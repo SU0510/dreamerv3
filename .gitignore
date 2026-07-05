@@ -4,7 +4,5 @@ __pycache__/
 *.py[cod]
 *.egg-info
 MUJOCO_LOG.TXT
-.envrc
-.vscode/
 .DS_Store
 ;
