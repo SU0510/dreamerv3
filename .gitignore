@@ -5,3 +5,10 @@ __pycache__/
 *.egg-info
 MUJOCO_LOG.TXT
 ;
+.envrc
+.vscode/
+.claude/
+.serena/
+.DS_Store
+__pycache__/
+*.pyc
