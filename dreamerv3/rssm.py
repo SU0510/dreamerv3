@@ -9,16 +9,17 @@ import jax.numpy as jnp
 import ninjax as nj
 import numpy as np
 
-f32 = jnp.float32
-sg = jax.lax.stop_gradient
+f32 = jnp.float32  # [JAX -> PyTorch对照] jnp.float32 等价于 torch.float32
+sg = jax.lax.stop_gradient  # [JAX -> PyTorch对照] jax.lax.stop_gradient 等价于 tensor.detach()。截断自动求导的梯度流。
 
 
-class RSSM(nj.Module):
+class RSSM(nj.Module):  # [JAX -> PyTorch对照] nj.Module 是 ninjax 提供的基类，等价于 PyTorch 中的 torch.nn.Module，用于管理网络参数和模块状态。
 
   deter: int = 4096
   hidden: int = 2048
   stoch: int = 32
   classes: int = 32
+  
   norm: str = 'rms'
   act: str = 'gelu'
   unroll: bool = False
@@ -33,7 +34,7 @@ class RSSM(nj.Module):
 
   def __init__(self, act_space, **kw):
     assert self.deter % self.blocks == 0
-    self.act_space = act_space
+    self.act_space = act_space 
     self.kw = kw
 
   @property
@@ -44,18 +45,18 @@ class RSSM(nj.Module):
 
   def initial(self, bsize):
     carry = nn.cast(dict(
-        deter=jnp.zeros([bsize, self.deter], f32),
+        deter=jnp.zeros([bsize, self.deter], f32),  # [JAX -> PyTorch对照] jnp.zeros 对应 torch.zeros(..., dtype=torch.float32)
         stoch=jnp.zeros([bsize, self.stoch, self.classes], f32)))
     return carry
 
   def truncate(self, entries, carry=None):
     assert entries['deter'].ndim == 3, entries['deter'].shape
-    carry = jax.tree.map(lambda x: x[:, -1], entries)
+    carry = jax.tree.map(lambda x: x[:, -1], entries)  # [JAX -> PyTorch对照] jax.tree.map 在 PyTorch 中通常写为字典推导式： {k: v[:, -1] for k, v in entries.items()}
     return carry
 
   def starts(self, entries, carry, nlast):
-    B = len(jax.tree.leaves(carry)[0])
-    return jax.tree.map(
+    B = len(jax.tree.leaves(carry)[0])  # [JAX -> PyTorch对照] jax.tree.leaves 会把嵌套字典里所有的 tensor 展平提出到一个列表里。PyTorch 中可以使用 torch.utils._pytree.tree_leaves。
+    return jax.tree.map(  # [JAX -> PyTorch对照] 同样是利用 tree_map 深度遍历结构应用操作。
         lambda x: x[:, -nlast:].reshape((B * nlast, *x.shape[2:])), entries)
 
   def observe(self, carry, tokens, action, reset, training, single=False):
@@ -66,7 +67,7 @@ class RSSM(nj.Module):
       return carry, entry, feat
     else:
       unroll = jax.tree.leaves(tokens)[0].shape[1] if self.unroll else 1
-      carry, (entries, feat) = nj.scan(
+      carry, (entries, feat) = nj.scan(  # [JAX -> PyTorch对照] nj.scan (底层封装 jax.lax.scan)，在 PyTorch 中直接对应原生的 Python for 循环。在时间步上展开RNN。
           lambda carry, inputs: self._observe(
               carry, *inputs, training),
           carry, (tokens, action, reset), unroll=unroll, axis=1)
@@ -79,12 +80,12 @@ class RSSM(nj.Module):
     action = nn.mask(action, ~reset)
     deter = self._core(deter, stoch, action)
     tokens = tokens.reshape((*deter.shape[:-1], -1))
-    x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
+    x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)  # [JAX -> PyTorch对照] jnp.concatenate 对应 torch.cat([deter, tokens], dim=-1)
     for i in range(self.obslayers):
       x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
       x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
     logit = self._logit('obslogit', x)
-    stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+    stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))  # [JAX -> PyTorch对照] nj.seed() 用于获取伪随机数Key。在PyTorch的分布采样中，直接调用 .sample() 即可。
     carry = dict(deter=deter, stoch=stoch)
     feat = dict(deter=deter, stoch=stoch, logit=logit)
     entry = dict(deter=deter, stoch=stoch)
@@ -97,7 +98,7 @@ class RSSM(nj.Module):
       actemb = nn.DictConcat(self.act_space, 1)(action)
       deter = self._core(carry['deter'], carry['stoch'], actemb)
       logit = self._prior(deter)
-      stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+      stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))  # [JAX -> PyTorch对照] 和前面一样，PyTorch 只需要直接掉用分布类的 .sample() 行随机采样。
       carry = nn.cast(dict(deter=deter, stoch=stoch))
       feat = nn.cast(dict(deter=deter, stoch=stoch, logit=logit))
       assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, stoch, logit))
@@ -125,7 +126,7 @@ class RSSM(nj.Module):
     dyn = self._dist(sg(post)).kl(self._dist(prior))
     rep = self._dist(post).kl(self._dist(sg(prior)))
     if self.free_nats:
-      dyn = jnp.maximum(dyn, self.free_nats)
+      dyn = jnp.maximum(dyn, self.free_nats)  # [JAX -> PyTorch对照] jnp.maximum 控制 KL 下界防止过拟合，对应 torch.maximum(dyn, torch.tensor(self.free_nats)) 或 torch.clamp(..., min=self.free_nats)
       rep = jnp.maximum(rep, self.free_nats)
     losses = {'dyn': dyn, 'rep': rep}
     metrics['dyn_ent'] = self._dist(prior).entropy().mean()
@@ -134,7 +135,7 @@ class RSSM(nj.Module):
 
   def _core(self, deter, stoch, action):
     stoch = stoch.reshape((stoch.shape[0], -1))
-    action /= sg(jnp.maximum(1, jnp.abs(action)))
+    action /= sg(jnp.maximum(1, jnp.abs(action)))  # [JAX -> PyTorch对照] jnp.maximum -> torch.maximum 或 torch.clamp；jnp.abs -> torch.abs
     g = self.blocks
     flat2group = lambda x: einops.rearrange(x, '... (g h) -> ... g h', g=g)
     group2flat = lambda x: einops.rearrange(x, '... g h -> ... (g h)', g=g)
@@ -144,16 +145,16 @@ class RSSM(nj.Module):
     x1 = nn.act(self.act)(self.sub('dynin1norm', nn.Norm, self.norm)(x1))
     x2 = self.sub('dynin2', nn.Linear, self.hidden, **self.kw)(action)
     x2 = nn.act(self.act)(self.sub('dynin2norm', nn.Norm, self.norm)(x2))
-    x = jnp.concatenate([x0, x1, x2], -1)[..., None, :].repeat(g, -2)
+    x = jnp.concatenate([x0, x1, x2], -1)[..., None, :].repeat(g, -2)  # [JAX -> PyTorch对照] jnp.concatenate 对应 torch.cat
     x = group2flat(jnp.concatenate([flat2group(deter), x], -1))
     for i in range(self.dynlayers):
       x = self.sub(f'dynhid{i}', nn.BlockLinear, self.deter, g, **self.kw)(x)
       x = nn.act(self.act)(self.sub(f'dynhid{i}norm', nn.Norm, self.norm)(x))
     x = self.sub('dyngru', nn.BlockLinear, 3 * self.deter, g, **self.kw)(x)
-    gates = jnp.split(flat2group(x), 3, -1)
+    gates = jnp.split(flat2group(x), 3, -1)  # [JAX -> PyTorch对照] jnp.split 对应 torch.split(x, split_size_or_sections=3, dim=-1) 或 torch.chunk(x, 3, dim=-1)
     reset, cand, update = [group2flat(x) for x in gates]
-    reset = jax.nn.sigmoid(reset)
-    cand = jnp.tanh(reset * cand)
+    reset = jax.nn.sigmoid(reset)  # [JAX -> PyTorch对照] 对应 torch.sigmoid 或 torch.nn.functional.sigmoid。用作 GRU 重置门。
+    cand = jnp.tanh(reset * cand)  # [JAX -> PyTorch对照] 对应 torch.tanh。候选态激活函数。
     update = jax.nn.sigmoid(update - 1)
     deter = update * cand + (1 - update) * deter
     return deter
@@ -172,11 +173,11 @@ class RSSM(nj.Module):
 
   def _dist(self, logits):
     out = embodied.jax.outs.OneHot(logits, self.unimix)
-    out = embodied.jax.outs.Agg(out, 1, jnp.sum)
+    out = embodied.jax.outs.Agg(out, 1, jnp.sum)  # [JAX -> PyTorch对照] jnp.sum 对应 torch.sum
     return out
 
 
-class Encoder(nj.Module):
+class Encoder(nj.Module):  # [JAX -> PyTorch对照] 对应 torch.nn.Module
 
   units: int = 1024
   norm: str = 'rms'
@@ -226,7 +227,7 @@ class Encoder(nj.Module):
     if self.imgkeys:
       K = self.kernel
       imgs = [obs[k] for k in sorted(self.imgkeys)]
-      assert all(x.dtype == jnp.uint8 for x in imgs)
+      assert all(x.dtype == jnp.uint8 for x in imgs)  # [JAX -> PyTorch对照] jnp.uint8 对应 torch.uint8
       x = nn.cast(jnp.concatenate(imgs, -1), force=True) / 255 - 0.5
       x = x.reshape((-1, *x.shape[bdims:]))
       for i, depth in enumerate(self.depths):
@@ -244,13 +245,13 @@ class Encoder(nj.Module):
       x = x.reshape((x.shape[0], -1))
       outs.append(x)
 
-    x = jnp.concatenate(outs, -1)
+    x = jnp.concatenate(outs, -1)  # [JAX -> PyTorch对照] jnp.concatenate 对应 torch.cat(outs, dim=-1)
     tokens = x.reshape((*bshape, *x.shape[1:]))
     entries = {}
     return carry, entries, tokens
 
 
-class Decoder(nj.Module):
+class Decoder(nj.Module):  # [JAX -> PyTorch对照] 对应 torch.nn.Module
 
   units: int = 1024
   norm: str = 'rms'
@@ -292,7 +293,7 @@ class Decoder(nj.Module):
     bshape = reset.shape
     inp = [nn.cast(feat[k]) for k in ('stoch', 'deter')]
     inp = [x.reshape((math.prod(bshape), -1)) for x in inp]
-    inp = jnp.concatenate(inp, -1)
+    inp = jnp.concatenate(inp, -1)  # [JAX -> PyTorch对照] jnp.concatenate 对应 torch.cat(inp, dim=-1)
 
     if self.veckeys:
       spaces = {k: self.obs_space[k] for k in self.veckeys}
@@ -350,7 +351,7 @@ class Decoder(nj.Module):
       x = x.reshape((*bshape, *x.shape[1:]))
       split = np.cumsum(
           [self.obs_space[k].shape[-1] for k in self.imgkeys][:-1])
-      for k, out in zip(self.imgkeys, jnp.split(x, split, -1)):
+      for k, out in zip(self.imgkeys, jnp.split(x, split, -1)):  # [JAX -> PyTorch对照] jnp.split支持传入切片段列表，PyTorch使用 torch.split(x, split_size_list, dim=-1)
         out = embodied.jax.outs.MSE(out)
         out = embodied.jax.outs.Agg(out, 3, jnp.sum)
         recons[k] = out
